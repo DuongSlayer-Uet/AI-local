@@ -6,9 +6,7 @@ set -euo pipefail
 echo "==> [1/7] Dọn dẹp & cập nhật apt..."
 sudo apt clean
 sudo apt update
-
-echo "==> [2/7] Cài vim..."
-sudo apt install -y vim
+sudo apt install -y zstd
 
 echo "==> [3/7] Cài Ollama..."
 curl -fsSL https://ollama.com/install.sh | sh
