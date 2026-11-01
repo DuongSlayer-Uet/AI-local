@@ -30,6 +30,8 @@ pip install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
 echo "==> [6/6] Thiết lập LD_LIBRARY_PATH cho cuBLAS/cuDNN..."
 CUDA_LIB_PATH=$(python -c 'import os, nvidia.cublas, nvidia.cudnn; print(os.path.dirname(nvidia.cublas.__path__[0]) + "/cublas/lib:" + os.path.dirname(nvidia.cudnn.__path__[0]) + "/cudnn/lib")')
 export LD_LIBRARY_PATH="${CUDA_LIB_PATH}:${LD_LIBRARY_PATH:-}"
+python -m pip uninstall -y av
+python -m pip install --no-cache-dir --only-binary=:all: av==18.1.0
 
 # Ghi vào ~/.bashrc để không phải export lại mỗi lần mở terminal mới
 if ! grep -qF "${CUDA_LIB_PATH}" ~/.bashrc 2>/dev/null; then
