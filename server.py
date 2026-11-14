@@ -1,3 +1,5 @@
+import asyncio
+import json
 import os
 import tempfile
 import time
@@ -10,6 +12,8 @@ import uvicorn
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
+from mcp import ClientSession
+from mcp.client.sse import sse_client
 from pydantic import BaseModel, Field
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 from vieneu import Vieneu
@@ -17,15 +21,22 @@ from vieneu import Vieneu
 # ============================================================
 # CẤU HÌNH - sửa ở đây
 # ============================================================
-SERVER_HOST = "100.80.26.125"   # IP server lắng nghe, sửa nếu cần (vd: tailscale IP)
+SERVER_HOST = "0.0.0.0"   # IP server lắng nghe, sửa nếu cần (vd: tailscale IP)
 SERVER_PORT = 8000
 
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 MODEL_NAME = "qwen3:8b"
 SYSTEM_PROMPT = (
     "You are a helpful AI assistant. Do not use thinking mode. "
-    "Answer directly and concisely in 2-3 sentences. Avoid unnecessary explanations."
+    "Answer directly and concisely in 2-3 sentences. Avoid unnecessary explanations. "
+    "If a provided tool can directly answer the question (e.g. hardware status), call it "
+    "instead of guessing."
 )
+
+# MCP server chạy trên Raspberry Pi, expose các tool phần cứng (vd: measure_temp).
+# Sửa IP cho đúng địa chỉ Raspberry Pi. Thêm tool mới bên mcp_server.py, không cần
+# sửa gì ở đây - danh sách tool được lấy tự động lúc khởi động server này.
+MCP_SERVER_URL = "http://<raspi-ip>:8765/sse"
 
 WHISPER_MODEL_ID = "openai/whisper-large-v3-turbo"
 WHISPER_LANGUAGE = "vietnamese"  # đổi hoặc để None nếu muốn Whisper tự detect ngôn ngữ
@@ -66,7 +77,55 @@ _tts_t0 = time.time()
 tts = Vieneu(mode="v3turbo")
 print(f"VieNeu-TTS loaded in {time.time() - _tts_t0:.2f}s")
 
-app = FastAPI(title="AI Local Server", version="2.0.0")
+
+# ============================================================
+# MCP CLIENT - gọi tool chạy trên Raspberry Pi (mcp_server.py)
+# ============================================================
+async def _list_mcp_tools_async():
+    async with sse_client(MCP_SERVER_URL) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.list_tools()
+            return result.tools
+
+
+async def _call_mcp_tool_async(name: str, arguments: dict):
+    async with sse_client(MCP_SERVER_URL) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool(name, arguments)
+            for block in result.content:
+                if block.type == "text":
+                    return block.text
+            return str(result.content)
+
+
+def _mcp_tools_to_ollama_format(tools) -> list:
+    """Chuyển tool list của MCP thành format 'tools' mà Ollama /api/chat hiểu."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "description": t.description or "",
+                "parameters": t.inputSchema,
+            },
+        }
+        for t in tools
+    ]
+
+
+print(f"Đang lấy danh sách MCP tools từ {MCP_SERVER_URL} ...")
+try:
+    _mcp_tools = asyncio.run(_list_mcp_tools_async())
+    OLLAMA_TOOLS = _mcp_tools_to_ollama_format(_mcp_tools)
+    print(f"MCP tools: {[t.name for t in _mcp_tools]}")
+except Exception as e:
+    print(f"Không kết nối được MCP server ({e}) - chạy không có tool.")
+    OLLAMA_TOOLS = []
+
+
+app = FastAPI(title="AI Local Server", version="3.0.0")
 
 
 class TextRequest(BaseModel):
@@ -77,16 +136,16 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def ask_ollama(message: str) -> str:
+async def _ollama_chat(messages: list) -> dict:
     payload = {
         "model": MODEL_NAME,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": message},
-        ],
+        "messages": messages,
         "think": False,
         "stream": False,
     }
+    if OLLAMA_TOOLS:
+        payload["tools"] = OLLAMA_TOOLS
+
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=5.0)) as client:
             response = await client.post(OLLAMA_URL, json=payload)
@@ -98,16 +157,40 @@ async def ask_ollama(message: str) -> str:
     except httpx.HTTPStatusError as error:
         raise HTTPException(502, f"Ollama error: {error.response.text}")
 
-    return response.json()["message"]["content"]
+    return response.json()["message"]
 
 
-def _transcribe_sync(filepath: str) -> str:
-    return asr_pipe(filepath)["text"]
+async def ask_ollama(message: str) -> str:
+    """Hỏi LLM; nếu LLM muốn gọi tool thì thực thi qua MCP rồi hỏi lại 1 lần
+    nữa để có câu trả lời cuối cùng bằng lời."""
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": message},
+    ]
 
+    reply = await _ollama_chat(messages)
 
-async def transcribe_audio(filepath: str) -> str:
-    """STT, CPU/GPU-bound -> chạy trong threadpool để không block event loop."""
-    return await run_in_threadpool(_transcribe_sync, filepath)
+    tool_calls = reply.get("tool_calls")
+    if tool_calls:
+        messages.append(reply)
+        for call in tool_calls:
+            name = call["function"]["name"]
+            args = call["function"].get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {}
+            try:
+                result = await _call_mcp_tool_async(name, args)
+            except Exception as e:
+                result = f"Lỗi khi gọi tool {name}: {e}"
+            print(f"            [MCP] {name}({args}) -> {result}")
+            messages.append({"role": "tool", "name": name, "content": str(result)})
+
+        reply = await _ollama_chat(messages)
+
+    return reply["content"]
 
 
 def _synthesize_speech_sync(text: str) -> str:
@@ -121,21 +204,31 @@ async def synthesize_speech(text: str) -> str:
     return await run_in_threadpool(_synthesize_speech_sync, text)
 
 
+def _transcribe_sync(filepath: str) -> str:
+    return asr_pipe(filepath)["text"]
+
+
+async def transcribe_audio(filepath: str) -> str:
+    """STT, CPU/GPU-bound -> chạy trong threadpool để không block event loop."""
+    return await run_in_threadpool(_transcribe_sync, filepath)
+
+
 @app.get("/health")
 async def health():
-    return {"status": "online", "timestamp": now()}
+    return {"status": "online", "mcp_tools": [t["function"]["name"] for t in OLLAMA_TOOLS], "timestamp": now()}
 
 
 @app.post("/text")
 async def text(request: TextRequest):
-    """Nhận text, trả về text (chỉ qua LLM, không qua STT/TTS)."""
+    """Nhận text, trả về text (qua LLM, có thể có gọi MCP tool bên trong)."""
     reply = await ask_ollama(request.message)
     return {"response": reply, "timestamp": now()}
 
 
 @app.post("/audio")
 async def audio(file: UploadFile = File(...)):
-    """Nhận audio (.wav), chạy full pipeline STT -> LLM -> TTS, trả về audio (.wav)."""
+    """Nhận audio (.wav), chạy full pipeline STT -> LLM (+ MCP tool nếu cần) -> TTS,
+    trả về audio (.wav)."""
     if not file.filename.lower().endswith(".wav"):
         raise HTTPException(400, "Only .wav files are supported")
 
