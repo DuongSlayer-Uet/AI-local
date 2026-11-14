@@ -12,3 +12,6 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+
+# Piper TTS models
+piper/models/
