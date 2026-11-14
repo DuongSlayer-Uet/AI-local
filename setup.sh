@@ -16,9 +16,12 @@ pip install httpx
 
 # uvicorn
 pip install "uvicorn[standard]" fastapi
+pip install python-multipart
 
 # ollama setup
 curl -fsSL https://ollama.com/install.sh | sh
 
 # download qwen3:8b
 ollama pull qwen3:8b
+
+pip install --upgrade piper-tts
