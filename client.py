@@ -28,7 +28,7 @@ import requests
 # ============================================================
 # CAU HINH - sua o day
 # ============================================================
-SERVER_URL = "http://100.80.26.125:8000/audio"  # sua IP:port server o day
+SERVER_URL = "http://100.82.247.92:8000/audio"  # sua IP:port server o day
 REQUEST_TIMEOUT = 60  # giay, cho whisper + llm + tts ben server xu ly xong
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

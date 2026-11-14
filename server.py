@@ -101,18 +101,23 @@ async def _call_mcp_tool_async(name: str, arguments: dict):
 
 
 def _mcp_tools_to_ollama_format(tools) -> list:
-    """Chuyển tool list của MCP thành format 'tools' mà Ollama /api/chat hiểu."""
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": t.name,
-                "description": t.description or "",
-                "parameters": t.inputSchema,
-            },
-        }
-        for t in tools
-    ]
+    """Chuyển tool list của MCP thành format 'tools' mà Ollama /api/chat hiểu.
+    Dùng model_dump(by_alias=True) thay vì truy cập thuộc tính trực tiếp vì tên
+    thuộc tính nội bộ (inputSchema/input_schema) có thể khác nhau tùy version SDK."""
+    result = []
+    for t in tools:
+        data = t.model_dump(by_alias=True)
+        result.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": data["name"],
+                    "description": data.get("description") or "",
+                    "parameters": data.get("inputSchema", {}),
+                },
+            }
+        )
+    return result
 
 
 print(f"Đang lấy danh sách MCP tools từ {MCP_SERVER_URL} ...")

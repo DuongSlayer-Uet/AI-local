@@ -25,3 +25,13 @@ curl -fsSL https://ollama.com/install.sh | sh
 ollama pull qwen3:8b
 
 pip install --upgrade piper-tts
+
+# transfpormers, datasets[audio], accelerate
+pip install --upgrade pip
+pip install --upgrade transformers datasets[audio] accelerate
+
+# mcp
+pip install "mcp[cli]"
+
+# vieneu
+pip install vieneu
